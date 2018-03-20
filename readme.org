@@ -1,0 +1,21 @@
+* Google Cloud Platform Monitoring API - Golang Example
+  __THIS WILL PROBABLY CHARGE ($$$) YOUR GOOGLE ACCOUNT IF YOU RUN IT A BUNCH, I'M NOT RESPONSIBLE FOR THAT__
+
+  An example of the usage of the golang GCP monitoring API, meant to show a real example of it's usage rather than Google's examples, which are far too simple.
+
+** Info
+   The code runs through the provided project and lists all available metrics, then calls to get 3 GCP compute CPU metrics in parallel, using a ~sync.WaitGroup~ to wait on the goroutines. 
+
+** Usage
+   Clone, go build, and run with: 
+   #+BEGIN_SRC sh
+     golang-gcp-monitoring --service-account=<YOUR_SERVICE_ACCOUNT_PATH> --project-id=<YOUR_PROJECT_NAME>
+   #+END_SRC
+   
+   or
+
+   #+BEGIN_SRC sh
+     go install github.com/peixian/golang-gcp-monitoring
+     golang-gcp-monitoring --service-account=<YOUR_SERVICE_ACCOUNT_PATH> --project-id=<YOUR_PROJECT_NAME>
+   #+END_SRC
+
