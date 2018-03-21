@@ -23,7 +23,20 @@ type timeSeries struct {
 	points []*monitoringpb.Point
 }
 
-func listAndParseTimeSeries(metricType, projectID string, c *monitoring.MetricClient) ([]timeSeries, error) {
+func filterMetric(metricType string) bool {
+	// function to filter metrics based on type
+	// returns true if the metric should be kept, otherwise returns false
+
+	// ignore aws and agent metrics
+	// e.g. "aws.googleapis.com/S3/NumberOfObjects/Sum" or "agent.googleapis.com/redis/connections/total"
+	if strings.HasPrefix(metricType, "aws") || strings.HasPrefix(metricType, "agent") {
+		return false
+	}
+
+	return true
+}
+
+func listAndParseTimeSeries(metricType, projectID string, c *monitoring.MetricClient, timeDelta int) ([]timeSeries, error) {
 	// takes a metric type such as "compute.google.apis.com/instance/cpu/usage_time" and calls each time series, and parses it
 	// returns the timeseries as a map of timeseries ID's to timeSeries structs
 
@@ -42,13 +55,12 @@ func listAndParseTimeSeries(metricType, projectID string, c *monitoring.MetricCl
 				Seconds: time.Now().Unix(),
 			},
 			StartTime: &googlepb.Timestamp{
-				Seconds: time.Now().Add(-5 * time.Minute).Unix(),
+				Seconds: time.Now().Add(time.Duration(-1*timeDelta) * time.Minute).Unix(),
 			},
 		},
 	}
 
 	listTimeSeriesIter := c.ListTimeSeries(context.Background(), listTimeSeriesReq)
-	//points := make([]*monitoringpb.Point, 0)
 	for {
 		resp, err := listTimeSeriesIter.Next()
 		if err == iterator.Done {
@@ -76,6 +88,8 @@ func main() {
 	serviceAccountLocation := flag.String("service-account", "", "Path to service account. Will fail if not provided")
 	projectID := flag.String("project-id", "", "ID of the google cloud project. Will fail if not provided")
 
+	timeDelta := flag.Int("time-delta", 5, "The start time of the oldest metric. Defaults to 5 minutes from now.")
+
 	flag.Parse()
 
 	if *serviceAccountLocation == "" || *projectID == "" {
@@ -83,6 +97,8 @@ func main() {
 	}
 
 	ctx := context.Background()
+
+	start := time.Now()
 
 	// constructs a metric client from a service account
 	client, err := monitoring.NewMetricClient(ctx, option.WithServiceAccountFile(*serviceAccountLocation))
@@ -115,7 +131,7 @@ func main() {
 		fmt.Println(resp.Type)
 
 		// for example only, this only scrapes the google cloud compute stuff
-		if strings.HasPrefix(resp.Type, "compute.googleapis.com/instance/cpu") {
+		if filterMetric(resp.Type) {
 			wantedMetrics = append(wantedMetrics, resp.Type)
 		}
 		metricsCount++
@@ -125,6 +141,7 @@ func main() {
 	fmt.Printf("\n Scraping %v metrics: \n\t", len(wantedMetrics))
 	fmt.Println(wantedMetrics)
 
+	pointsCount := 0
 	//uses a sync.waitgroup to collect all the goroutines
 	var wg sync.WaitGroup
 	for _, metricType := range wantedMetrics {
@@ -132,8 +149,22 @@ func main() {
 		go func(metricType string) {
 			defer wg.Done()
 
-			listAndParseTimeSeries(metricType, *projectID, client)
+			tss, err := listAndParseTimeSeries(metricType, *projectID, client, *timeDelta)
+			if err != nil {
+				log.Printf("\nError getting metric %v", metricType)
+			}
+			for _, ts := range tss {
+				pointsCount += len(ts.points)
+			}
+
 		}(metricType)
 	}
 	wg.Wait()
+
+	fmt.Println("Results: ")
+	fmt.Println("\tPossible Metrics: ", metricsCount)
+	fmt.Println("\tCrawled Metrics: ", len(wantedMetrics))
+	fmt.Println("\tCrawled Points: ", pointsCount)
+	fmt.Printf("\tTime range: %v minutes\n", *timeDelta)
+	fmt.Println("\tTook: ", time.Since(start))
 }
