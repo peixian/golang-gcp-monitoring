@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -18,9 +20,17 @@ import (
 
 type timeSeries struct {
 	// struct used to hold timeseries
-	name   string
-	labels map[string]string
-	points []*monitoringpb.Point
+	Name   string                `json:"Name,omitempty"`
+	Labels map[string]string     `json:"labels,omitempty"`
+	Points []*monitoringpb.Point `json:"points,omitempty"`
+}
+
+func generateLabelID(labels map[string]string) string {
+	var ID strings.Builder
+	for k, v := range labels {
+		fmt.Fprintf(&ID, "%s:%s ", k, v)
+	}
+	return ID.String()
 }
 
 func filterMetric(metricType string) bool {
@@ -29,20 +39,20 @@ func filterMetric(metricType string) bool {
 
 	// ignore aws and agent metrics
 	// e.g. "aws.googleapis.com/S3/NumberOfObjects/Sum" or "agent.googleapis.com/redis/connections/total"
-	if strings.HasPrefix(metricType, "aws") || strings.HasPrefix(metricType, "agent") {
+	if strings.HasPrefix(metricType, "aws") || strings.HasPrefix(metricType, "agent") || strings.HasPrefix(metricType, "avere") {
 		return false
 	}
 
 	return true
 }
 
-func listAndParseTimeSeries(metricType, projectID string, c *monitoring.MetricClient, timeDelta int) ([]timeSeries, error) {
+func listAndParseTimeSeries(metricType, projectID string, c *monitoring.MetricClient, timeDelta int) (map[string]timeSeries, error) {
 	// takes a metric type such as "compute.google.apis.com/instance/cpu/usage_time" and calls each time series, and parses it
 	// returns the timeseries as a map of timeseries ID's to timeSeries structs
 
 	fmt.Println("Scraping metric: ", metricType)
 
-	tsSlice := make([]timeSeries, 0)
+	tsMap := make(map[string]timeSeries)
 
 	// see https://godoc.org/google.golang.org/genproto/googleapis/monitoring/v3#ListTimeSeriesRequest
 	// at minimum, require a Name, Filter string, and Interval.
@@ -68,23 +78,28 @@ func listAndParseTimeSeries(metricType, projectID string, c *monitoring.MetricCl
 		}
 		if err != nil {
 			log.Printf("\nError listing timeseries: %v\n", err)
-			return tsSlice, err
+			return tsMap, err
 		}
 
 		//resp returns a TimeSeries struct (https://godoc.org/google.golang.org/genproto/googleapis/monitoring/v3#TimeSeries)
 		ts := resp
 
-		fmt.Printf("Found %v points for %v with value type %v with label %v\n", len(ts.Points), ts.Metric.Type, ts.ValueType, ts.Metric.Labels)
-		tsSlice = append(tsSlice, timeSeries{
-			name:   ts.Metric.Type,
-			labels: ts.Metric.Labels,
-			points: ts.Points,
-		})
+		//fmt.Printf("Found %v points for %v with value type %v with label %v\n", len(ts.Points), ts.Metric.Type, ts.ValueType, ts.Metric.Labels)
+		tsMap[generateLabelID(ts.Metric.Labels)] = timeSeries{
+			Labels: ts.Metric.Labels,
+			Points: ts.Points,
+		}
 	}
-	return tsSlice, nil
+	return tsMap, nil
 }
 
 func main() {
+	f, err := os.Create("./metrics.json")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+
 	serviceAccountLocation := flag.String("service-account", "", "Path to service account. Will fail if not provided")
 	projectID := flag.String("project-id", "", "ID of the google cloud project. Will fail if not provided")
 
@@ -139,8 +154,8 @@ func main() {
 
 	fmt.Printf("\n Found %v unique metrics", metricsCount)
 	fmt.Printf("\n Scraping %v metrics: \n\t", len(wantedMetrics))
-	fmt.Println(wantedMetrics)
 
+	c := make(chan string, len(wantedMetrics))
 	pointsCount := 0
 	//uses a sync.waitgroup to collect all the goroutines
 	var wg sync.WaitGroup
@@ -149,22 +164,42 @@ func main() {
 		go func(metricType string) {
 			defer wg.Done()
 
-			tss, err := listAndParseTimeSeries(metricType, *projectID, client, *timeDelta)
+			tsm, err := listAndParseTimeSeries(metricType, *projectID, client, *timeDelta)
 			if err != nil {
 				log.Printf("\nError getting metric %v", metricType)
+				return
 			}
-			for _, ts := range tss {
-				pointsCount += len(ts.points)
+			if len(tsm) == 0 {
+				return
 			}
 
+			for _, ts := range tsm {
+				pointsCount += len(ts.Points)
+			}
+
+			outJSON, err := json.Marshal(tsm)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+
+			c <- string(outJSON)
+			return
 		}(metricType)
 	}
 	wg.Wait()
+	close(c)
 
 	fmt.Println("Results: ")
 	fmt.Println("\tPossible Metrics: ", metricsCount)
 	fmt.Println("\tCrawled Metrics: ", len(wantedMetrics))
 	fmt.Println("\tCrawled Points: ", pointsCount)
-	fmt.Printf("\tTime range: %v minutes\n", *timeDelta)
+	fmt.Println("\tTime range: ", *timeDelta)
 	fmt.Println("\tTook: ", time.Since(start))
+
+	for outJSON := range c {
+		f.WriteString(outJSON)
+		f.WriteString("\n")
+	}
+
 }
