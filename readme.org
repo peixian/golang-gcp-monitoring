@@ -15,7 +15,7 @@
    or
 
    #+BEGIN_SRC sh
-     go install github.com/peixian/golang-gcp-monitoring
+     go get -u github.com/peixian/golang-gcp-monitoring
      golang-gcp-monitoring --service-account=<YOUR_SERVICE_ACCOUNT_PATH> --project-id=<YOUR_PROJECT_NAME>
    #+END_SRC
 

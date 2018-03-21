@@ -93,37 +93,65 @@ func listAndParseTimeSeries(metricType, projectID string, c *monitoring.MetricCl
 	return tsMap, nil
 }
 
-func main() {
+func getMetrics(ctx context.Context, client *monitoring.MetricClient, wantedMetrics []string, projectID string, timeDelta int) int {
 	f, err := os.Create("./metrics.json")
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer f.Close()
 
-	serviceAccountLocation := flag.String("service-account", "", "Path to service account. Will fail if not provided")
-	projectID := flag.String("project-id", "", "ID of the google cloud project. Will fail if not provided")
+	c := make(chan string, len(wantedMetrics))
+	pointsCount := 0
+	//uses a sync.waitgroup to collect all the goroutines
+	var wg sync.WaitGroup
+	for _, metricType := range wantedMetrics {
+		wg.Add(1)
+		go func(metricType string) {
+			defer wg.Done()
 
-	timeDelta := flag.Int("time-delta", 5, "The start time of the oldest metric. Defaults to 5 minutes from now.")
+			tsm, err := listAndParseTimeSeries(metricType, projectID, client, timeDelta)
+			if err != nil {
+				log.Printf("\nError getting metric %v", metricType)
+				return
+			}
+			if len(tsm) == 0 {
+				return
+			}
 
-	flag.Parse()
+			for _, ts := range tsm {
+				pointsCount += len(ts.Points)
+			}
 
-	if *serviceAccountLocation == "" || *projectID == "" {
-		log.Fatalf("No service account or project ID provided")
+			outJSON, err := json.Marshal(tsm)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+
+			c <- string(outJSON)
+			return
+		}(metricType)
 	}
+	wg.Wait()
+	close(c)
 
-	ctx := context.Background()
+	for outJSON := range c {
+		f.WriteString(outJSON)
+		f.WriteString("\n")
+	}
+	return pointsCount
+}
 
-	start := time.Now()
-
+func collectMetrics(ctx context.Context, serviceAccountLocation, projectID string) (*monitoring.MetricClient, []string, int) {
 	// constructs a metric client from a service account
-	client, err := monitoring.NewMetricClient(ctx, option.WithServiceAccountFile(*serviceAccountLocation))
+	client, err := monitoring.NewMetricClient(ctx, option.WithServiceAccountFile(serviceAccountLocation))
 	if err != nil {
 		log.Fatalf("Failed to create client: %v", err)
 	}
 
 	// requires a Name to list all Metrics
 	listMetricsReq := &monitoringpb.ListMetricDescriptorsRequest{
-		Name: "projects/" + *projectID,
+		Name: "projects/" + projectID,
 	}
 
 	//metrics to collect
@@ -151,44 +179,29 @@ func main() {
 		}
 		metricsCount++
 	}
+	return client, wantedMetrics, metricsCount
 
-	fmt.Printf("\n Found %v unique metrics", metricsCount)
-	fmt.Printf("\n Scraping %v metrics: \n\t", len(wantedMetrics))
+}
 
-	c := make(chan string, len(wantedMetrics))
-	pointsCount := 0
-	//uses a sync.waitgroup to collect all the goroutines
-	var wg sync.WaitGroup
-	for _, metricType := range wantedMetrics {
-		wg.Add(1)
-		go func(metricType string) {
-			defer wg.Done()
+func main() {
 
-			tsm, err := listAndParseTimeSeries(metricType, *projectID, client, *timeDelta)
-			if err != nil {
-				log.Printf("\nError getting metric %v", metricType)
-				return
-			}
-			if len(tsm) == 0 {
-				return
-			}
+	serviceAccountLocation := flag.String("service-account", "", "Path to service account. Will fail if not provided")
+	projectID := flag.String("project-id", "", "ID of the google cloud project. Will fail if not provided")
 
-			for _, ts := range tsm {
-				pointsCount += len(ts.Points)
-			}
+	timeDelta := flag.Int("time-delta", 5, "The start time of the oldest metric. Defaults to 5 minutes from now.")
 
-			outJSON, err := json.Marshal(tsm)
-			if err != nil {
-				log.Println(err)
-				return
-			}
+	flag.Parse()
 
-			c <- string(outJSON)
-			return
-		}(metricType)
+	if *serviceAccountLocation == "" || *projectID == "" {
+		log.Fatalf("No service account or project ID provided")
 	}
-	wg.Wait()
-	close(c)
+
+	ctx := context.Background()
+
+	start := time.Now()
+
+	client, wantedMetrics, metricsCount := collectMetrics(ctx, *serviceAccountLocation, *projectID)
+	pointsCount := getMetrics(ctx, client, wantedMetrics, *projectID, *timeDelta)
 
 	fmt.Println("Results: ")
 	fmt.Println("\tPossible Metrics: ", metricsCount)
@@ -196,10 +209,5 @@ func main() {
 	fmt.Println("\tCrawled Points: ", pointsCount)
 	fmt.Println("\tTime range: ", *timeDelta)
 	fmt.Println("\tTook: ", time.Since(start))
-
-	for outJSON := range c {
-		f.WriteString(outJSON)
-		f.WriteString("\n")
-	}
 
 }
